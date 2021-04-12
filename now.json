@@ -1,0 +1,9 @@
+{
+    "redirects": [
+        {
+            "source": "/prirucka",
+            "destination": "https://github.com/cesko-digital/derisking-handbook",
+            "statusCode": 302
+        }
+    ]
+}
