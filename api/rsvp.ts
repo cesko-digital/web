@@ -2,94 +2,79 @@ import { VercelRequest, VercelResponse } from '@vercel/node'
 import Airtable from 'airtable'
 
 interface Event {
-  Name: string | undefined
-  Attendees: string[] | undefined
-  Emails: string | undefined
+  Attendees?: string[]
 }
 
 export default async (
   req: VercelRequest,
   res: VercelResponse
 ): Promise<void> => {
-  // Only GET or POST supported
-  if (req.method !== 'GET' && req.method !== 'POST') {
+  // Only POST supported
+  if (req.method !== 'POST') {
     res.status(501).send('Not implemented')
     return
   }
 
-  const apiToken = process.env.RSVP_API_KEY
+  const apiToken = process.env.AIRTABLE_API_KEY
   if (!apiToken) {
     res.status(500).send('Airtable API key not found in env.')
     return
   }
 
-  const table = new Airtable({ apiKey: apiToken }).base('apppZX1QC3fl1RTBM')(
-    'RSVP'
-  )
+  const base = new Airtable({ apiKey: apiToken }).base('appkn1DkvgVI5jpME')
 
-  // GET: return event details
-  if (req.method === 'GET') {
-    const eventId = req.query.eventId
-    if (!eventId || Array.isArray(eventId)) {
-      res.status(400).send("Required 'eventId' argument missing.")
-      return
-    }
-    const event = (await table.find(eventId)) as Airtable.Record<Event>
-    const fields = {
-      name: event.fields.Name,
-    }
-    // We don’t use res.json() here intentionally to get pretty printing
-    const out = JSON.stringify(fields, null, 2)
-    res.setHeader('Content-Type', 'application/json')
-    res.status(200).send(out)
-    return
-  }
-
-  // POST: Update RSVP
   try {
-    const userId = req.body.userId
-    if (!userId) {
+    //
+    // 1. Check arguments
+    //
+    const slackUserId = req.body?.userId
+    if (!slackUserId) {
       res.status(400).send("Required 'userId' argument missing.")
       return
     }
-    const eventId = req.body.eventId
+    const eventId = req.body?.eventId
     if (!eventId) {
       res.status(400).send("Required 'eventId' argument missing.")
       return
     }
 
-    if (validateEmail(userId)) {
-      // Insert email into database
-      const event = (await table.find(eventId)) as Airtable.Record<Event>
-      const emails = (event.fields['Emails'] || '').split('|')
-      if (!emails.includes(userId)) {
-        await table.update(eventId, {
-          Emails: emails.concat([userId]).join('|'),
-        })
-      }
-    } else {
-      // Insert userId into atendees
-
-      // TBD: Is this a race condition? It probably is:
-      // https://community.airtable.com/t/append-linked-record-using-api/39420
-      // Would the window for trouble be smaller if we wrote to the User database
-      // instead of events?
-      const event = (await table.find(eventId)) as Airtable.Record<Event>
-      const attendees = event.fields['Attendees'] || []
-      if (!attendees.includes(userId)) {
-        await table.update(eventId, {
-          Attendees: attendees.concat([userId]),
-        })
-      }
+    //
+    // 2. Get user details to translate userId into Airtable record ID
+    //
+    const userTable = base('Slack Users')
+    const matchingUserRecords = await userTable
+      .select({
+        filterByFormula: `{Slack: ID} = '${slackUserId}'`,
+      })
+      .all()
+    if (matchingUserRecords.length !== 1) {
+      res.status(400).send('Invalid number of user records matching given ID.')
+      return
     }
-    res.status(200).send('Díky, budeme se těšit!')
-  } catch (e) {
-    // TBD: Remove error logging before production deployment
-    res.status(500).send(`Error: ${e}`)
-  }
-}
+    const airtableUserId = matchingUserRecords[0].id
+    if (!airtableUserId) {
+      res.status(500).send('Cannot translate user ID to Airtable record ID.')
+      return
+    }
 
-function validateEmail(email: string) {
-  const re = /^(([^<>()[\]\\.,;:\s@\"]+(\.[^<>()[\]\\.,;:\s@\"]+)*)|(\".+\"))@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\])|(([a-zA-Z\-0-9]+\.)+[a-zA-Z]{2,}))$/
-  return re.test(email)
+    //
+    // 3. Add user to Attendees if not already present
+    //
+
+    // TBD: Is this a race condition? It probably is:
+    // https://community.airtable.com/t/append-linked-record-using-api/39420
+    // Would the window for trouble be smaller if we wrote to the User database
+    // instead of events?
+    const eventTable = base('Events')
+    const event: Airtable.Record<Event> = await eventTable.find(eventId)
+    const attendees = event.fields.Attendees || []
+    if (!attendees.includes(airtableUserId)) {
+      await eventTable.update(eventId, {
+        Attendees: attendees.concat([airtableUserId]),
+      })
+    }
+    res.status(200).send('Thanks, be seeing you!')
+  } catch (e) {
+    res.status(500).send('Well, this didn’t work, sorry.')
+  }
 }
